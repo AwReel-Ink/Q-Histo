@@ -1,0 +1,26 @@
+{
+  "name": "Q'Histo - Gestion de Recettes",
+  "short_name": "Q'Histo",
+  "description": "Application de gestion de recettes professionnelles avec conversion d'unités et calcul de coûts",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2196F3",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["food", "productivity", "utilities"],
+  "screenshots": []
+}

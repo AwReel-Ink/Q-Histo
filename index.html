@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Q'Histo - Gestionnaire de Recettes</title>
+    
+    <!-- PWA Meta tags -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#2196F3">
+    <meta name="description" content="Application de gestion de recettes professionnelles avec conversion d'unités et calcul de coûts">
+    
+    <!-- Icons -->
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+    <link rel="apple-touch-icon" href="icons/icon-512.png">
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    
+    <!-- MENU PRINCIPAL -->
+    <div id="menu-page" class="page active">
+        <div class="container">
+            <h1>🍳 Q'Histo</h1>
+            <div class="menu-buttons">
+                <button class="btn btn-primary" onclick="app.showRecipeList()">
+                    📋 Liste des recettes
+                </button>
+                <button class="btn btn-success" onclick="app.showEditor()">
+                    ➕ Ajouter une recette
+                </button>
+                <button class="btn btn-info" onclick="app.showInfo()">
+                    ℹ️ Informations
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LISTE DES RECETTES -->
+    <div id="list-page" class="page">
+        <div class="header">
+            <button class="btn-back" onclick="app.showMenu()">← Retour</button>
+            <h2>Mes Recettes</h2>
+        </div>
+        <div class="container">
+            <input type="text" id="search" placeholder="🔍 Rechercher une recette..." class="search-input">
+            <div id="recipe-list" class="recipe-list"></div>
+        </div>
+    </div>
+
+    <!-- AFFICHAGE RECETTE -->
+    <div id="view-page" class="page">
+        <div class="header">
+            <button class="btn-back" onclick="app.showRecipeList()">← Retour</button>
+            <h2 id="view-title"></h2>
+        </div>
+        <div class="container">
+            <div id="view-content"></div>
+        </div>
+    </div>
+
+    <!-- LISTE DE COURSES -->
+    <div id="shopping-page" class="page">
+        <div class="header">
+            <button class="btn-back" onclick="app.backFromShopping()">← Retour</button>
+            <h2>📝 Liste de courses</h2>
+        </div>
+        <div class="container">
+            <div id="shopping-list"></div>
+            <button class="btn btn-danger" onclick="app.clearShopping()">
+                🗑️ Supprimer la liste
+            </button>
+        </div>
+    </div>
+
+    <!-- ÉDITEUR DE RECETTE -->
+    <div id="editor-page" class="page">
+        <div class="header">
+            <button class="btn-back" onclick="app.cancelEdit()">← Annuler</button>
+            <h2 id="editor-title">Nouvelle recette</h2>
+        </div>
+        <div class="container">
+            <form id="recipe-form">
+                <div class="form-group">
+                    <label>Nom de la recette *</label>
+                    <input type="text" id="recipe-name" required>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nombre de personnes</label>
+                        <input type="number" id="recipe-persons" min="0" step="1" placeholder="Ex: 4">
+                    </div>
+                    <div class="form-group">
+                        <label>Quantité (portions)</label>
+                        <input type="number" id="recipe-quantity" min="0" step="1" placeholder="Ex: 12">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Temps de cuisson</label>
+                    <input type="text" id="recipe-time" placeholder="Ex: 30 min">
+                </div>
+
+                <div class="form-group">
+                    <label>Ingrédients *</label>
+                    <div id="ingredients-list"></div>
+                    <button type="button" class="btn btn-sm" onclick="app.addIngredient()">
+                        ➕ Ajouter un ingrédient
+                    </button>
+                </div>
+
+                <div class="form-group">
+                    <label>Étapes de préparation</label>
+                    <div id="steps-list"></div>
+                    <button type="button" class="btn btn-sm" onclick="app.addStep()">
+                        ➕ Ajouter une étape
+                    </button>
+                </div>
+
+                <button type="submit" class="btn btn-primary btn-block">
+                    💾 Enregistrer la recette
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- PAGE INFORMATIONS -->
+    <div id="info-page" class="page">
+        <div class="header">
+            <button class="btn-back" onclick="app.showMenu()">← Retour</button>
+            <h2>Informations</h2>
+        </div>
+        <div class="container">
+            <div class="info-section">
+                <p><strong>Créateur :</strong> LEROY Aurélien</p>
+                <p><strong>Version :</strong> 1.0.0</p>
+                <p><strong>Copyright :</strong> © LEROY Aurélien - 2025 - Q'Histo - Tout Droits Réservés</p>
+                <p><strong>Nombre de recettes :</strong> <span id="recipe-count">0</span></p>
+            </div>
+
+            <div class="form-group">
+                <label>Thème</label>
+                <select id="theme-select" onchange="app.changeTheme(this.value)">
+                    <option value="light">☀️ Clair</option>
+                    <option value="dark">🌙 Sombre</option>
+                    <option value="desert">🏜️ Désert</option>
+                    <option value="spring">🌸 Printemps</option>
+                    <option value="forest">🌲 Forêt</option>
+                    <option value="autumn">🍂 Automne</option>
+                    <option value="halloween">🎃 Halloween</option>
+                </select>
+            </div>
+
+                        <div class="info-section">
+                <h3>Export / Import</h3>
+                <button class="btn btn-primary btn-block" onclick="app.exportData()">
+                    💾 Sauvegarder (Export JSON)
+                </button>
+                <button class="btn btn-warning btn-block" onclick="app.importData()">
+                    📥 Importer (remplace tout)
+                </button>
+                <input type="file" id="import-file" accept=".json" style="display:none" onchange="app.handleImport(event)">
+            </div>
+        </div>
+    </div>
+
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js')
+                    .then(registration => {
+                        console.log('✅ Service Worker enregistré:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.error('❌ Erreur Service Worker:', error);
+                    });
+            });
+        }
+    </script>
+    
+    <script src="app.js"></script>
+</body>
+</html>
