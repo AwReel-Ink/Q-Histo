@@ -1,105 +1,70 @@
-const CACHE_NAME = 'qhisto-v1';
+// Changer ce numéro n'est plus obligatoire à chaque mise à jour :
+// les fichiers sont d'abord demandés au réseau, le cache ne sert qu'hors ligne.
+const CACHE_NAME = 'qhisto-v2';
+
+// Chemins relatifs : fonctionne aussi bien à la racine que sous /Q-Histo/
 const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/app.js',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png'
+  './',
+  './index.html',
+  './style.css',
+  './app.js',
+  './manifest.json',
+  './icons/icon-192.png',
+  './icons/icon-512.png'
 ];
 
-// Installation du Service Worker
+const NETWORK_TIMEOUT = 4000;
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('📦 Cache ouvert');
-        return cache.addAll(ASSETS_TO_CACHE);
-      })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS_TO_CACHE))
   );
   self.skipWaiting();
 });
 
-// Activation du Service Worker
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('🗑️ Suppression ancien cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
+    caches.keys().then((names) => Promise.all(
+      names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))
+    ))
   );
   self.clients.claim();
 });
 
-// Stratégie Cache First (Network Fallback)
+// Réseau d'abord (pour toujours avoir la dernière version), cache si hors ligne ou trop lent
 self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request)
-      .then((response) => {
-        // Retourne du cache si disponible
-        if (response) {
-          return response;
-        }
-        
-        // Sinon, récupère depuis le réseau
-        return fetch(event.request).then((response) => {
-          // Ne pas mettre en cache les requêtes non-GET
-          if (event.request.method !== 'GET') {
-            return response;
-          }
-
-          // Clone la réponse
-          const responseToCache = response.clone();
-
-          caches.open(CACHE_NAME)
-            .then((cache) => {
-              cache.put(event.request, responseToCache);
-            });
-
-          return response;
-        });
-      })
-      .catch(() => {
-        // Page offline basique si pas de réseau
-        return new Response(
-          `<!DOCTYPE html>
-          <html>
-          <head>
-            <title>Q'Histo - Hors ligne</title>
-            <style>
-              body {
-                font-family: Arial, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                text-align: center;
-              }
-              h1 { font-size: 2em; margin-bottom: 1em; }
-              p { font-size: 1.2em; }
-            </style>
-          </head>
-          <body>
-            <div>
-              <h1>📵 Mode hors ligne</h1>
-              <p>Q'Histo n'est pas disponible sans connexion.</p>
-              <p>Reconnectez-vous pour accéder à vos recettes.</p>
-            </div>
-          </body>
-          </html>`,
-          {
-            headers: { 'Content-Type': 'text/html' }
-          }
-        );
-      })
-  );
+  const request = event.request;
+  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
+  event.respondWith(networkFirst(event, request));
 });
+
+async function networkFirst(event, request) {
+  const cache = await caches.open(CACHE_NAME);
+
+  const network = fetch(request).then((response) => {
+    if (response.ok) cache.put(request, response.clone());
+    return response;
+  });
+  event.waitUntil(network.catch(() => {}));
+
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), NETWORK_TIMEOUT));
+
+  try {
+    return await Promise.race([network, timeout]);
+  } catch (error) {
+    const cached = await cache.match(request, { ignoreSearch: true });
+    if (cached) return cached;
+    if (request.mode === 'navigate') {
+      const index = await cache.match('./index.html');
+      if (index) return index;
+    }
+    try {
+      return await network;
+    } catch (e) {
+      return new Response('Q\'Histo est hors ligne.', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      });
+    }
+  }
+}

@@ -4,31 +4,35 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Q'Histo - Gestionnaire de Recettes</title>
-    
+
     <!-- PWA Meta tags -->
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#2196F3">
-    <meta name="description" content="Application de gestion de recettes professionnelles avec conversion d'unités et calcul de coûts">
-    
+    <meta name="description" content="Mes recettes avec les quantités, ajustables au nombre de personnes, et ma liste de courses">
+
     <!-- Icons -->
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
     <link rel="apple-touch-icon" href="icons/icon-512.png">
-    
+
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    
+
     <!-- MENU PRINCIPAL -->
     <div id="menu-page" class="page active">
         <div class="container">
             <h1>🍳 Q'Histo</h1>
+            <div id="backup-banner" class="backup-banner" style="display:none"></div>
             <div class="menu-buttons">
                 <button class="btn btn-primary" onclick="app.showRecipeList()">
                     📋 Liste des recettes
                 </button>
                 <button class="btn btn-success" onclick="app.showEditor()">
                     ➕ Ajouter une recette
+                </button>
+                <button class="btn btn-warning" onclick="app.showShopping('menu')">
+                    🛒 Liste de courses <span id="shopping-count" class="badge" style="display:none"></span>
                 </button>
                 <button class="btn btn-info" onclick="app.showInfo()">
                     ℹ️ Informations
@@ -44,7 +48,16 @@
             <h2>Mes Recettes</h2>
         </div>
         <div class="container">
-            <input type="text" id="search" placeholder="🔍 Rechercher une recette..." class="search-input">
+            <input type="search" id="search" placeholder="🔍 Nom, ingrédient, étiquette..." class="search-input">
+            <div class="list-toolbar">
+                <div id="list-filters" class="chip-list"></div>
+                <select id="sort-select" class="sort-select" aria-label="Trier">
+                    <option value="az">A → Z</option>
+                    <option value="za">Z → A</option>
+                    <option value="recent">Plus récentes</option>
+                    <option value="old">Plus anciennes</option>
+                </select>
+            </div>
             <div id="recipe-list" class="recipe-list"></div>
         </div>
     </div>
@@ -54,6 +67,7 @@
         <div class="header">
             <button class="btn-back" onclick="app.showRecipeList()">← Retour</button>
             <h2 id="view-title"></h2>
+            <button id="view-fav" class="btn-icon fav-btn" onclick="app.toggleFavorite(app.currentRecipeId)" aria-label="Ajouter aux favoris">☆</button>
         </div>
         <div class="container">
             <div id="view-content"></div>
@@ -64,13 +78,10 @@
     <div id="shopping-page" class="page">
         <div class="header">
             <button class="btn-back" onclick="app.backFromShopping()">← Retour</button>
-            <h2>📝 Liste de courses</h2>
+            <h2>🛒 Liste de courses</h2>
         </div>
         <div class="container">
-            <div id="shopping-list"></div>
-            <button class="btn btn-danger" onclick="app.clearShopping()">
-                🗑️ Supprimer la liste
-            </button>
+            <div id="shopping-content"></div>
         </div>
     </div>
 
@@ -81,30 +92,40 @@
             <h2 id="editor-title">Nouvelle recette</h2>
         </div>
         <div class="container">
-            <form id="recipe-form">
+            <form id="recipe-form" novalidate>
                 <div class="form-group">
-                    <label>Nom de la recette *</label>
-                    <input type="text" id="recipe-name" required>
+                    <label for="recipe-name">Nom de la recette *</label>
+                    <input type="text" id="recipe-name">
                 </div>
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Nombre de personnes</label>
+                        <label for="recipe-persons">Nombre de personnes</label>
                         <input type="number" id="recipe-persons" min="0" step="1" placeholder="Ex: 4">
                     </div>
                     <div class="form-group">
-                        <label>Quantité (portions)</label>
+                        <label for="recipe-quantity">Quantité (portions)</label>
                         <input type="number" id="recipe-quantity" min="0" step="1" placeholder="Ex: 12">
                     </div>
                 </div>
 
                 <div class="form-group">
-                    <label>Temps de cuisson</label>
+                    <label for="recipe-time">Temps de cuisson</label>
                     <input type="text" id="recipe-time" placeholder="Ex: 30 min">
                 </div>
 
                 <div class="form-group">
+                    <label>Étiquettes</label>
+                    <div id="editor-tags" class="chip-list"></div>
+                    <div class="custom-tag-row">
+                        <input type="text" id="custom-tag" placeholder="Autre étiquette (ex : Noël)">
+                        <button type="button" class="btn btn-sm" onclick="app.addCustomTag()">➕ Ajouter</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
                     <label>Ingrédients *</label>
+                    <p class="hint">Laisse la quantité vide pour « à volonté » (sel, poivre…).</p>
                     <div id="ingredients-list"></div>
                     <button type="button" class="btn btn-sm" onclick="app.addIngredient()">
                         ➕ Ajouter un ingrédient
@@ -117,6 +138,17 @@
                     <button type="button" class="btn btn-sm" onclick="app.addStep()">
                         ➕ Ajouter une étape
                     </button>
+                </div>
+
+                <div class="form-group">
+                    <label for="recipe-notes">Notes &amp; astuces</label>
+                    <textarea id="recipe-notes" placeholder="Ex : se congèle très bien, servir avec une salade verte…"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Photo</label>
+                    <div id="photo-editor" class="photo-editor"></div>
+                    <input type="file" id="photo-input" accept="image/*" style="display:none">
                 </div>
 
                 <button type="submit" class="btn btn-primary btn-block">
@@ -135,13 +167,13 @@
         <div class="container">
             <div class="info-section">
                 <p><strong>Créateur :</strong> LEROY Aurélien</p>
-                <p><strong>Version :</strong> 1.0.0</p>
-                <p><strong>Copyright :</strong> © LEROY Aurélien - 2025 - Q'Histo - Tout Droits Réservés</p>
+                <p><strong>Version :</strong> 2.0.0</p>
+                <p><strong>Copyright :</strong> © LEROY Aurélien - 2025 - Q'Histo - Tous droits réservés</p>
                 <p><strong>Nombre de recettes :</strong> <span id="recipe-count">0</span></p>
             </div>
 
             <div class="form-group">
-                <label>Thème</label>
+                <label for="theme-select">Thème</label>
                 <select id="theme-select" onchange="app.changeTheme(this.value)">
                     <option value="light">☀️ Clair</option>
                     <option value="dark">🌙 Sombre</option>
@@ -153,24 +185,31 @@
                 </select>
             </div>
 
-                        <div class="info-section">
+            <div class="info-section">
                 <h3>Export / Import</h3>
+                <p><strong>Dernière sauvegarde :</strong> <span id="last-export">jamais</span></p>
+                <p><strong>Stockage :</strong> <span id="storage-status">…</span></p>
                 <button class="btn btn-primary btn-block" onclick="app.exportData()">
                     💾 Sauvegarder (Export JSON)
                 </button>
-                <button class="btn btn-warning btn-block" onclick="app.importData()">
+                <button class="btn btn-info btn-block" onclick="app.importData('merge')">
+                    📥 Importer (ajoute aux recettes actuelles)
+                </button>
+                <button class="btn btn-warning btn-block" onclick="app.importData('replace')">
                     📥 Importer (remplace tout)
                 </button>
-                <input type="file" id="import-file" accept=".json" style="display:none" onchange="app.handleImport(event)">
+                <input type="file" id="import-file" accept=".json,application/json" style="display:none" onchange="app.handleImport(event)">
             </div>
         </div>
     </div>
 
-    <!-- Service Worker Registration -->
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <!-- Service Worker Registration (chemin relatif : fonctionne sous /Q-Histo/) -->
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js')
+                navigator.serviceWorker.register('./sw.js')
                     .then(registration => {
                         console.log('✅ Service Worker enregistré:', registration.scope);
                     })
@@ -180,7 +219,7 @@
             });
         }
     </script>
-    
+
     <script src="app.js"></script>
 </body>
 </html>
