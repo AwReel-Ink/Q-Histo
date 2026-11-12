@@ -92,6 +92,7 @@
             <h2 id="editor-title">Nouvelle recette</h2>
         </div>
         <div class="container">
+            <div id="editor-warning" class="editor-warning" role="alert" style="display:none"></div>
             <form id="recipe-form" novalidate>
                 <div class="form-group">
                     <label for="recipe-name">Nom de la recette *</label>
@@ -167,7 +168,7 @@
         <div class="container">
             <div class="info-section">
                 <p><strong>Créateur :</strong> LEROY Aurélien</p>
-                <p><strong>Version :</strong> 2.0.0</p>
+                <p><strong>Version :</strong> 3.0.0</p>
                 <p><strong>Copyright :</strong> © LEROY Aurélien - 2025 - Q'Histo - Tous droits réservés</p>
                 <p><strong>Nombre de recettes :</strong> <span id="recipe-count">0</span></p>
             </div>
@@ -186,7 +187,10 @@
             </div>
 
             <div class="info-section">
-                <h3>Export / Import</h3>
+                <h3>Synchronisation &amp; sauvegardes</h3>
+                <button class="btn btn-success btn-block" onclick="app.openHomeServer()">
+                    🏠 Serveur maison
+                </button>
                 <p><strong>Dernière sauvegarde :</strong> <span id="last-export">jamais</span></p>
                 <p><strong>Stockage :</strong> <span id="storage-status">…</span></p>
                 <button class="btn btn-primary btn-block" onclick="app.exportData()">
@@ -220,6 +224,8 @@
         }
     </script>
 
+    <!-- Synchro « Serveur maison » : chargé avant l'appli -->
+    <script src="sync-maison.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

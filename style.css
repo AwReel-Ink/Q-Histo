@@ -1043,3 +1043,17 @@ body {
         border-radius: 0;
     }
 }
+
+/* ===== SYNCHRO : avertissement dans l'éditeur ===== */
+.editor-warning {
+    background: var(--bg-secondary);
+    border-left: 4px solid var(--warning);
+    border-radius: 8px;
+    padding: 12px 15px;
+    margin-bottom: 20px;
+    line-height: 1.5;
+}
+
+.editor-warning .link-btn {
+    padding: 4px 0 0;
+}

@@ -1,6 +1,6 @@
 // Changer ce numéro n'est plus obligatoire à chaque mise à jour :
 // les fichiers sont d'abord demandés au réseau, le cache ne sert qu'hors ligne.
-const CACHE_NAME = 'qhisto-v2';
+const CACHE_NAME = 'qhisto-v3';
 
 // Chemins relatifs : fonctionne aussi bien à la racine que sous /Q-Histo/
 const ASSETS_TO_CACHE = [
@@ -8,6 +8,7 @@ const ASSETS_TO_CACHE = [
   './index.html',
   './style.css',
   './app.js',
+  './sync-maison.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'

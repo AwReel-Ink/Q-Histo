@@ -1,9 +1,9 @@
 /**
  * Q'HISTO - Application de gestion de recettes
- * Version 2.0.0
+ * Version 3.0.0
  */
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '3.0.0';
 
 const STORAGE = {
     recipes: 'qhisto-recipes',
@@ -44,35 +44,82 @@ const UNIT_GROUPS = [
 const COOKING_STATE_TTL = 12 * 60 * 60 * 1000;
 const BACKUP_REMINDER_DAYS = 30;
 
-// ===== STOCKAGE DES PHOTOS (IndexedDB, bien plus spacieux que localStorage) =====
-const PhotoStore = {
+// ===== BASE DE DONNÉES (IndexedDB) =====
+// Version 1 : 'photos' seulement. Version 2 : + 'recettes' et 'courses' (avant dans le localStorage).
+const DB_NAME = 'qhisto';
+const DB_VERSION = 2;
+const SHOPPING_ID = 'liste';
+
+// Copie indépendante : l'objet peut être modifié pendant que l'écriture attend la base
+const cloneData = (value) => (typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value)));
+
+const DB = {
     _db: null,
     open() {
         if (this._db) return this._db;
         this._db = new Promise((resolve, reject) => {
             if (!('indexedDB' in window)) return reject(new Error('IndexedDB indisponible'));
-            const request = indexedDB.open('qhisto', 1);
-            request.onupgradeneeded = () => request.result.createObjectStore('photos');
-            request.onsuccess = () => resolve(request.result);
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos');
+                if (!db.objectStoreNames.contains('recettes')) db.createObjectStore('recettes', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('courses')) db.createObjectStore('courses', { keyPath: 'id' });
+            };
+            request.onsuccess = () => {
+                const db = request.result;
+                // Une autre fenêtre ouvre une version plus récente : on libère la base
+                db.onversionchange = () => db.close();
+                resolve(db);
+            };
             request.onerror = () => reject(request.error);
+            request.onblocked = () => console.warn('[Q-Histo] Mise à jour de la base en attente : ferme les autres onglets de Q\'Histo.');
         });
         return this._db;
     },
-    async _run(mode, action) {
+    async _run(store, mode, action) {
         const db = await this.open();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction('photos', mode);
-            const request = action(tx.objectStore('photos'));
+            const tx = db.transaction(store, mode);
+            const request = action(tx.objectStore(store));
             tx.oncomplete = () => resolve(request ? request.result : undefined);
             tx.onerror = () => reject(tx.error);
             tx.onabort = () => reject(tx.error);
         });
     },
-    get(id) { return this._run('readonly', s => s.get(id)); },
-    set(id, data) { return this._run('readwrite', s => s.put(data, id)); },
-    delete(id) { return this._run('readwrite', s => s.delete(id)); },
-    clear() { return this._run('readwrite', s => s.clear()); }
+    get(store, key) { return this._run(store, 'readonly', s => s.get(key)); },
+    getAll(store) { return this._run(store, 'readonly', s => s.getAll()); },
+    getAllKeys(store) { return this._run(store, 'readonly', s => s.getAllKeys()); },
+    put(store, value, key) {
+        const copy = cloneData(value);
+        return this._run(store, 'readwrite', s => (key === undefined ? s.put(copy) : s.put(copy, key)));
+    },
+    putMany(store, values) {
+        const copies = values.map(cloneData);
+        return this._run(store, 'readwrite', s => { copies.forEach(v => s.put(v)); return null; });
+    },
+    delete(store, key) { return this._run(store, 'readwrite', s => s.delete(key)); }
 };
+
+// Photos : dataURL JPEG, rangée avec l'id de la recette comme clé
+const PhotoStore = {
+    get: (id) => DB.get('photos', id),
+    set: (id, data) => DB.put('photos', data, id),
+    delete: (id) => DB.delete('photos', id),
+    keys: () => DB.getAllKeys('photos')
+};
+
+// updatedAt : texte de date ISO (ou 1 pour une donnée ancienne) → nombre comparable
+function stamp(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+        const t = Date.parse(value);
+        if (Number.isFinite(t)) return t;
+    }
+    return 0;
+}
 
 class QHistoApp {
     constructor() {
@@ -87,12 +134,32 @@ class QHistoApp {
         this.shoppingReturn = 'menu';
         this.importMode = 'replace';
 
-        this.shopping = this.loadJSON(STORAGE.shopping, { recipes: [], checked: [] });
+        this.shopping = this.emptyShopping();
         this.cooking = this.loadJSON(STORAGE.cooking, {});
         this.listPrefs = Object.assign({ sort: 'az', tag: null, favOnly: false }, this.loadJSON(STORAGE.listPrefs, {}));
 
-        this.loadData();
         this.init();
+        this.ready = this.start();
+    }
+
+    // Chargement des données (IndexedDB), puis branchement de la synchro maison.
+    // L'écran s'affiche tout de suite : la synchro ne bloque jamais l'appli.
+    async start() {
+        try {
+            await this.loadData();
+        } catch (error) {
+            console.error(error);
+            alert('⚠️ Impossible d\'ouvrir la base de données de Q\'Histo sur cet appareil. Ferme les autres onglets de l\'appli puis recharge la page.');
+            return;
+        }
+        this.updateRecipeCount();
+        this.refreshCurrentPage();
+        this.requestPersistentStorage();
+        this.setupSync();
+
+        if (this.loadError) {
+            setTimeout(() => alert('⚠️ Les recettes enregistrées n\'ont pas pu être lues. Une copie de secours a été gardée. Tu peux réimporter ta dernière sauvegarde depuis « Informations ».'), 300);
+        }
     }
 
     // ===== INITIALISATION =====
@@ -154,12 +221,7 @@ class QHistoApp {
             if (e.target.matches('input[data-key]')) this.toggleShoppingItem(e.target.dataset.key);
         });
 
-        this.requestPersistentStorage();
         this.renderMenu();
-
-        if (this.loadError) {
-            setTimeout(() => alert('⚠️ Les recettes enregistrées n\'ont pas pu être lues. Une copie de secours a été gardée. Tu peux réimporter ta dernière sauvegarde depuis « Informations ».'), 300);
-        }
     }
 
     // ===== NAVIGATION =====
@@ -327,7 +389,7 @@ class QHistoApp {
         if (!recipe) return;
         recipe.favorite = !recipe.favorite;
         recipe.updatedAt = new Date().toISOString();
-        this.saveData();
+        this.storeRecipe(recipe);
 
         if (document.getElementById('view-page').classList.contains('active')) this.updateFavoriteButton();
         else this.renderRecipeList();
@@ -566,18 +628,30 @@ class QHistoApp {
         this.saveJSON(STORAGE.cooking, this.cooking);
     }
 
-    deleteRecipe(id) {
-        if (!confirm('Supprimer cette recette ?')) return;
+    async deleteRecipe(id) {
+        if (!confirm('Supprimer cette recette ?\n\nElle sera aussi supprimée sur tous les appareils synchronisés.')) return;
 
+        const recipe = this.getRecipe(id);
         this.recipes = this.recipes.filter(r => r.id !== id);
         delete this.cooking[id];
         this.saveJSON(STORAGE.cooking, this.cooking);
-        this.shopping.recipes = this.shopping.recipes.filter(e => e.id !== id);
-        this.saveJSON(STORAGE.shopping, this.shopping);
         this.photoCache.delete(id);
-        PhotoStore.delete(id).catch(() => {});
-        this.saveData();
         this.showRecipeList();
+
+        try {
+            await DB.delete('recettes', id);
+            this.syncDelete('recettes', id);
+            await PhotoStore.delete(id);
+            if (recipe && recipe.hasPhoto) this.syncDelete('photos', id);
+        } catch (error) {
+            this.storageError(error);
+        }
+
+        if (this.shopping.recipes.some(e => e.id === id)) {
+            this.shopping.recipes = this.shopping.recipes.filter(e => e.id !== id);
+            if (this.shopping.recipes.length === 0) this.shopping.checked = [];
+            this.storeShopping();
+        }
     }
 
     printPage() {
@@ -593,13 +667,17 @@ class QHistoApp {
         this.addStep();
         this.editorTags = new Set();
         this.editorPhoto = { data: null, changed: false };
+        this.editorOriginal = null;
         this.renderEditorTags();
         this.renderEditorPhoto();
+        this.setEditorWarning('');
     }
 
     loadRecipeInEditor(id) {
         const recipe = this.getRecipe(id);
         if (!recipe) return;
+        this.editorOriginal = cloneData(recipe);
+        this.setEditorWarning('');
 
         document.getElementById('recipe-form').reset();
         document.getElementById('recipe-name').value = recipe.name;
@@ -808,19 +886,25 @@ class QHistoApp {
         }
 
         const now = new Date().toISOString();
+        // La recette a pu être modifiée (ou supprimée) par la synchro pendant la saisie :
+        // on garde le même identifiant pour que ce soit bien la même fiche partout.
         const existing = this.editingId ? this.getRecipe(this.editingId) : null;
-        const id = existing ? existing.id : this.generateId();
+        const original = existing || this.editorOriginal;
+        const id = this.editingId || this.generateId();
 
-        let hasPhoto = existing ? !!existing.hasPhoto : false;
+        let hasPhoto = original ? !!original.hasPhoto : false;
+        let photoChange = null; // 'set' | 'delete'
         if (this.editorPhoto.changed) {
             this.photoCache.delete(id);
             try {
                 if (this.editorPhoto.data) {
                     await PhotoStore.set(id, this.editorPhoto.data);
                     hasPhoto = true;
+                    photoChange = 'set';
                 } else {
                     await PhotoStore.delete(id);
                     hasPhoto = false;
+                    photoChange = 'delete';
                 }
             } catch (error) {
                 console.error(error);
@@ -836,37 +920,62 @@ class QHistoApp {
             quantity,
             time,
             tags: [...this.editorTags],
-            favorite: existing ? existing.favorite : false,
+            favorite: original ? !!original.favorite : false,
             notes,
             hasPhoto,
             ingredients,
             steps,
-            createdAt: existing ? existing.createdAt : now,
+            createdAt: (original && original.createdAt) || now,
             updatedAt: now
         };
 
         if (existing) {
-            // Si les ingrédients ou étapes ont changé, les cases cochées ne correspondent plus
-            const signature = r => JSON.stringify([r.ingredients.map(i => i.name), r.steps.map(s => s.description)]);
-            if (signature(existing) !== signature(recipe)) {
-                delete this.cooking[id];
-                this.saveJSON(STORAGE.cooking, this.cooking);
-            }
+            this.resetCookingIfChanged(existing, recipe);
             this.recipes[this.recipes.findIndex(r => r.id === id)] = recipe;
         } else {
             this.recipes.push(recipe);
         }
 
-        if (!this.saveData()) return;
+        if (!(await this.storeRecipe(recipe))) return;
+        if (photoChange === 'set') this.syncSave('photos', { id, image: this.editorPhoto.data, updatedAt: now });
+        if (photoChange === 'delete') this.syncDelete('photos', id);
+
         this.editorDirty = false;
+        this.editorOriginal = null;
         this.showRecipe(id, !!existing);
+    }
+
+    // Si les ingrédients ou étapes ont changé, les cases cochées ne correspondent plus
+    resetCookingIfChanged(before, after) {
+        const signature = r => JSON.stringify([r.ingredients.map(i => i.name), r.steps.map(s => s.description)]);
+        if (signature(before) !== signature(after) && this.cooking[after.id]) {
+            delete this.cooking[after.id];
+            this.saveJSON(STORAGE.cooking, this.cooking);
+        }
     }
 
     cancelEdit() {
         if (this.editorDirty && !confirm('Annuler les modifications ?')) return;
         this.editorDirty = false;
+        this.editorOriginal = null;
+        this.setEditorWarning('');
         if (this.editingId && this.getRecipe(this.editingId)) this.showRecipe(this.editingId, true);
         else this.showRecipeList();
+    }
+
+    // Bandeau d'avertissement en haut de l'éditeur (modification reçue d'un autre appareil)
+    setEditorWarning(html) {
+        const el = document.getElementById('editor-warning');
+        if (!el) return;
+        el.innerHTML = html;
+        el.style.display = html ? '' : 'none';
+    }
+
+    // Recharge dans l'éditeur la version reçue de l'autre appareil (abandonne la saisie)
+    reloadEditorFromRemote() {
+        if (this.editorDirty && !confirm('Abandonner ta saisie et afficher la version reçue ?')) return;
+        this.loadRecipeInEditor(this.editingId);
+        this.editorDirty = false;
     }
 
     // ===== LISTE DE COURSES (plusieurs recettes) =====
@@ -879,7 +988,7 @@ class QHistoApp {
         if (entry) entry.ratio = this.ratio;
         else this.shopping.recipes.push({ id: recipe.id, ratio: this.ratio });
 
-        this.saveJSON(STORAGE.shopping, this.shopping);
+        this.storeShopping();
         this.updateShoppingButton();
         this.showToast(entry ? 'Quantités mises à jour dans la liste de courses' : 'Ajoutée à la liste de courses 🛒', 'Voir la liste', () => this.showShopping('view'));
     }
@@ -1001,7 +1110,7 @@ class QHistoApp {
         const container = document.getElementById('shopping-items');
         this.animateReorder(container, () => {
             this.shopping.checked = this.toggleInList(this.shopping.checked, key);
-            this.saveJSON(STORAGE.shopping, this.shopping);
+            this.storeShopping();
             this.renderShoppingList();
         }, '#shopping-items');
     }
@@ -1014,27 +1123,27 @@ class QHistoApp {
         if (!base) return;
         const next = Math.max(1, Math.round(base * entry.ratio) + delta);
         entry.ratio = next / base;
-        this.saveJSON(STORAGE.shopping, this.shopping);
+        this.storeShopping();
         this.renderShoppingList();
     }
 
     removeFromShopping(id) {
         this.shopping.recipes = this.shopping.recipes.filter(e => e.id !== id);
         if (this.shopping.recipes.length === 0) this.shopping.checked = [];
-        this.saveJSON(STORAGE.shopping, this.shopping);
+        this.storeShopping();
         this.renderShoppingList();
     }
 
     uncheckAllShopping() {
         this.shopping.checked = [];
-        this.saveJSON(STORAGE.shopping, this.shopping);
+        this.storeShopping();
         this.renderShoppingList();
     }
 
     clearShopping() {
-        if (!confirm('Vider toute la liste de courses ?')) return;
-        this.shopping = { recipes: [], checked: [] };
-        this.saveJSON(STORAGE.shopping, this.shopping);
+        if (!confirm('Vider toute la liste de courses ?\n\nElle sera aussi vidée sur tous les appareils synchronisés.')) return;
+        this.shopping = this.emptyShopping();
+        this.storeShopping();
         this.renderShoppingList();
     }
 
@@ -1131,9 +1240,10 @@ class QHistoApp {
 
     importData(mode) {
         this.importMode = mode;
-        if (mode === 'replace' && !confirm('⚠️ ATTENTION : cet import va ÉCRASER toutes vos recettes actuelles. Continuer ?')) {
-            return;
-        }
+        const message = mode === 'replace'
+            ? '⚠️ ATTENTION : cet import va ÉCRASER toutes vos recettes actuelles.\n\nLe changement s\'appliquera à tous les appareils synchronisés : les recettes absentes du fichier y seront supprimées. Continuer ?'
+            : 'Les recettes du fichier vont être ajoutées (ou mises à jour si celles du fichier sont plus récentes).\n\nLe changement s\'appliquera à tous les appareils synchronisés. Continuer ?';
+        if (!confirm(message)) return;
         document.getElementById('import-file').click();
     }
 
@@ -1155,8 +1265,9 @@ class QHistoApp {
             return;
         }
 
+        // updatedAt du fichier conservé (1 s'il n'y en a pas) : un vieux fichier
+        // ne doit pas passer pour plus récent que les données du serveur.
         const isPhoto = p => typeof p === 'string' && /^data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+$/.test(p);
-        const takenIds = new Set(this.importMode === 'merge' ? this.recipes.map(r => r.id) : []);
         const incoming = [];
         for (const raw of data.recipes) {
             const recipe = this.normalizeRecipe(raw);
@@ -1169,47 +1280,65 @@ class QHistoApp {
             return;
         }
 
+        const now = new Date().toISOString();
         let added = 0, updated = 0, skipped = 0;
         let result;
+        const toWrite = [];
+        let toDelete = [];
+
         if (this.importMode === 'merge') {
             result = [...this.recipes];
             for (const item of incoming) {
                 const index = result.findIndex(r => r.id === item.recipe.id);
                 if (index === -1) {
                     result.push(item.recipe);
+                    toWrite.push(item);
                     added++;
-                } else if ((item.recipe.updatedAt || '') > (result[index].updatedAt || '')) {
+                } else if (stamp(item.recipe.updatedAt) > stamp(result[index].updatedAt)) {
+                    this.resetCookingIfChanged(result[index], item.recipe);
                     result[index] = item.recipe;
+                    toWrite.push(item);
                     updated++;
                 } else {
-                    item.skip = true;
                     skipped++;
                 }
             }
         } else {
-            // Évite les doublons d'identifiant dans le fichier
+            // Identifiant en double dans le fichier : la recette devient une nouvelle recette
+            const taken = new Set();
             for (const item of incoming) {
-                if (takenIds.has(item.recipe.id)) item.recipe.id = this.generateId(takenIds);
-                takenIds.add(item.recipe.id);
+                if (taken.has(item.recipe.id)) {
+                    item.recipe.id = this.generateId(taken);
+                    item.recipe.createdAt = now;
+                    item.recipe.updatedAt = now;
+                }
+                taken.add(item.recipe.id);
+                toWrite.push(item);
             }
-            result = incoming.map(i => i.recipe);
+            result = toWrite.map(i => i.recipe);
             added = result.length;
-            try { await PhotoStore.clear(); } catch (e) { console.error(e); }
+            toDelete = this.recipes.filter(r => !taken.has(r.id));
             this.cooking = {};
             this.saveJSON(STORAGE.cooking, this.cooking);
         }
 
         // Photos
         this.photoCache.clear();
-        for (const item of incoming) {
-            if (item.skip) continue;
+        let photoKeys = new Set();
+        try { photoKeys = new Set(await PhotoStore.keys()); } catch (e) { console.error(e); }
+        for (const item of toWrite) {
+            const id = item.recipe.id;
             try {
                 if (item.photo) {
-                    await PhotoStore.set(item.recipe.id, item.photo);
+                    await PhotoStore.set(id, item.photo);
                     item.recipe.hasPhoto = true;
+                    item.photoChange = 'set';
                 } else {
                     item.recipe.hasPhoto = false;
-                    await PhotoStore.delete(item.recipe.id);
+                    if (photoKeys.has(id)) {
+                        await PhotoStore.delete(id);
+                        item.photoChange = 'delete';
+                    }
                 }
             } catch (error) {
                 console.error(error);
@@ -1217,8 +1346,32 @@ class QHistoApp {
             }
         }
 
+        // Recettes
+        const deletedPhotos = [];
+        try {
+            await DB.putMany('recettes', toWrite.map(i => i.recipe));
+            for (const recipe of toDelete) {
+                await DB.delete('recettes', recipe.id);
+                if (photoKeys.has(recipe.id)) {
+                    await PhotoStore.delete(recipe.id);
+                    deletedPhotos.push(recipe.id);
+                }
+            }
+        } catch (error) {
+            this.storageError(error);
+            return;
+        }
         this.recipes = result;
-        if (!this.saveData()) return;
+
+        // Synchro : tout ce qui a été importé, et tout ce qui a disparu
+        for (const item of toWrite) {
+            this.syncSave('recettes', item.recipe);
+            if (item.photoChange === 'set') this.syncSave('photos', { id: item.recipe.id, image: item.photo, updatedAt: item.recipe.updatedAt });
+            if (item.photoChange === 'delete') this.syncDelete('photos', item.recipe.id);
+        }
+        for (const recipe of toDelete) this.syncDelete('recettes', recipe.id);
+        for (const id of deletedPhotos) this.syncDelete('photos', id);
+
         this.updateRecipeCount();
         this.renderMenu();
 
@@ -1255,43 +1408,112 @@ class QHistoApp {
         this.renderBackupInfo();
     }
 
-    saveData() {
+    // Enregistre une recette dans IndexedDB, puis la signale à la synchro
+    async storeRecipe(recipe) {
+        const record = cloneData(recipe);
         try {
-            localStorage.setItem(STORAGE.recipes, JSON.stringify(this.recipes));
-            return true;
+            await DB.put('recettes', record);
         } catch (error) {
-            console.error(error);
-            alert('⚠️ Impossible d\'enregistrer : le stockage du navigateur est plein ou indisponible. Exporte tes recettes pour ne rien perdre.');
+            this.storageError(error);
             return false;
         }
+        this.syncSave('recettes', record);
+        return true;
     }
 
-    loadData() {
-        const saved = localStorage.getItem(STORAGE.recipes);
-        if (!saved) {
-            this.recipes = [];
-            return;
-        }
+    // Enregistre la liste de courses (un seul enregistrement 'liste'), puis la signale à la synchro
+    async storeShopping() {
+        this.shopping.id = SHOPPING_ID;
+        this.shopping.updatedAt = new Date().toISOString();
+        const record = cloneData(this.shopping);
         try {
-            const parsed = JSON.parse(saved);
-            const taken = new Set();
-            this.recipes = (Array.isArray(parsed) ? parsed : [])
-                .map(r => this.normalizeRecipe(r))
-                .filter(Boolean)
-                .map(r => {
-                    if (taken.has(r.id)) r.id = this.generateId(taken);
-                    taken.add(r.id);
-                    return r;
-                });
+            await DB.put('courses', record);
         } catch (error) {
-            console.error(error);
-            try { localStorage.setItem('qhisto-recipes-corrupt-backup', saved); } catch (e) { /* plein */ }
-            this.recipes = [];
-            this.loadError = true;
+            this.storageError(error);
+            return false;
+        }
+        this.syncSave('courses', record);
+        return true;
+    }
+
+    storageError(error) {
+        console.error(error);
+        if (this.storageErrorShown) return;
+        this.storageErrorShown = true;
+        alert('⚠️ Impossible d\'enregistrer sur cet appareil : le stockage du navigateur est plein ou indisponible. Exporte tes recettes pour ne rien perdre.');
+    }
+
+    async loadData() {
+        await DB.open();
+        await this.migrateFromLocalStorage();
+
+        this.recipes = (await DB.getAll('recettes'))
+            .map(r => this.normalizeRecipe(r))
+            .filter(Boolean);
+        this.shopping = this.normalizeShopping(await DB.get('courses', SHOPPING_ID));
+    }
+
+    // Version 2 → 3 : recettes et liste de courses passent du localStorage à IndexedDB.
+    // L'ancienne clé n'est supprimée qu'une fois la copie vérifiée.
+    async migrateFromLocalStorage() {
+        const rawRecipes = localStorage.getItem(STORAGE.recipes);
+        if (rawRecipes !== null) {
+            let parsed = null;
+            try {
+                parsed = JSON.parse(rawRecipes);
+            } catch (error) {
+                console.error(error);
+                try { localStorage.setItem('qhisto-recipes-corrupt-backup', rawRecipes); } catch (e) { /* plein */ }
+                this.loadError = true;
+            }
+            if (Array.isArray(parsed)) {
+                const taken = new Set((await DB.getAllKeys('recettes')));
+                const recipes = [];
+                for (const recipe of parsed.map(r => this.normalizeRecipe(r)).filter(Boolean)) {
+                    // Même id deux fois dans l'ancienne liste (rare) : la seconde devient une nouvelle recette
+                    if (recipes.some(r => r.id === recipe.id)) recipe.id = this.generateId(taken);
+                    taken.add(recipe.id);
+                    recipes.push(recipe);
+                }
+                await DB.putMany('recettes', recipes);
+                const stored = new Set(await DB.getAllKeys('recettes'));
+                if (!recipes.every(r => stored.has(r.id))) throw new Error('Migration des recettes incomplète');
+            }
+            localStorage.removeItem(STORAGE.recipes);
+        }
+
+        const rawShopping = localStorage.getItem(STORAGE.shopping);
+        if (rawShopping !== null) {
+            let parsed = null;
+            try { parsed = JSON.parse(rawShopping); } catch (e) { parsed = null; }
+            if (parsed && Array.isArray(parsed.recipes) && parsed.recipes.length && !(await DB.get('courses', SHOPPING_ID))) {
+                // Pas de date : si le serveur a déjà une liste, c'est elle qui gagne
+                const record = this.normalizeShopping({ ...parsed, updatedAt: 1 });
+                await DB.put('courses', record);
+                if (!(await DB.get('courses', SHOPPING_ID))) throw new Error('Migration de la liste de courses incomplète');
+            }
+            localStorage.removeItem(STORAGE.shopping);
         }
     }
 
-    // Accepte les anciennes recettes (v1) et les fichiers importés, et les met au format actuel
+    emptyShopping() {
+        return { id: SHOPPING_ID, recipes: [], checked: [], updatedAt: 1 };
+    }
+
+    normalizeShopping(data) {
+        if (!data || typeof data !== 'object') return this.emptyShopping();
+        return {
+            id: SHOPPING_ID,
+            recipes: (Array.isArray(data.recipes) ? data.recipes : [])
+                .map(e => ({ id: Number(e && e.id), ratio: Number(e && e.ratio) }))
+                .filter(e => Number.isFinite(e.id) && Number.isFinite(e.ratio) && e.ratio > 0),
+            checked: (Array.isArray(data.checked) ? data.checked : []).filter(k => typeof k === 'string'),
+            updatedAt: stamp(data.updatedAt) > 0 ? data.updatedAt : 1
+        };
+    }
+
+    // Accepte les anciennes recettes (v1/v2), les fichiers importés et les données reçues,
+    // et les met au format actuel. updatedAt est gardé tel quel (1 s'il manque).
     normalizeRecipe(raw) {
         if (!raw || typeof raw !== 'object' || !raw.name || !Array.isArray(raw.ingredients)) return null;
 
@@ -1321,8 +1543,177 @@ class QHistoApp {
                 .filter(s => s && text(s.description))
                 .map(s => ({ description: text(s.description), time: text(s.time) })),
             createdAt: text(raw.createdAt) || now,
-            updatedAt: text(raw.updatedAt) || text(raw.createdAt) || now
+            updatedAt: stamp(raw.updatedAt) > 0 ? raw.updatedAt : 1
         };
+    }
+
+    // ===== SYNCHRO « SERVEUR MAISON » =====
+    setupSync() {
+        if (!window.SyncMaison) {
+            console.warn('[Q-Histo] sync-maison.js n\'est pas chargé : synchro désactivée.');
+            return;
+        }
+        try {
+            SyncMaison.configurer({
+                app: 'qhisto',
+                nom: 'Q-Histo',
+                mode: 'complet',
+                stores: ['recettes', 'photos', 'courses'],
+                toutLire: (store) => this.readAllForSync(store),
+                appliquer: (changes) => this.applyRemoteChanges(changes)
+            });
+        } catch (error) {
+            console.error('[Q-Histo] synchro :', error);
+        }
+    }
+
+    openHomeServer() {
+        if (window.SyncMaison && SyncMaison.instance) SyncMaison.ouvrirReglages();
+        else alert('Le module de synchronisation n\'est pas chargé. Recharge la page.');
+    }
+
+    syncSave(store, record) {
+        if (!window.SyncMaison) return;
+        SyncMaison.modifie(store, record).catch(error => console.error('[Q-Histo] synchro :', error));
+    }
+
+    syncDelete(store, id) {
+        if (!window.SyncMaison) return;
+        SyncMaison.supprime(store, id).catch(error => console.error('[Q-Histo] synchro :', error));
+    }
+
+    // Tous les enregistrements d'un store, pour le tout premier envoi de l'appareil
+    async readAllForSync(store) {
+        if (store === 'recettes') return DB.getAll('recettes');
+        if (store === 'courses') {
+            const record = await DB.get('courses', SHOPPING_ID);
+            return record ? [record] : [];
+        }
+        if (store === 'photos') {
+            const recipes = new Map((await DB.getAll('recettes')).map(r => [r.id, r]));
+            const photos = [];
+            for (const id of await PhotoStore.keys()) {
+                const recipe = recipes.get(id);
+                if (!recipe || !recipe.hasPhoto) continue;
+                const image = await PhotoStore.get(id);
+                if (typeof image === 'string') photos.push({ id, image, updatedAt: recipe.updatedAt });
+            }
+            return photos;
+        }
+        return [];
+    }
+
+    // Les ids reçus du serveur sont du texte : « 1700000000000 » → 1700000000000
+    toRecipeId(id) {
+        const n = Number(id);
+        return Number.isFinite(n) && String(n) === String(id) ? n : id;
+    }
+
+    // Changements reçus des autres appareils : écrits dans IndexedDB SANS rappeler SyncMaison
+    async applyRemoteChanges(changes) {
+        const touchedRecipes = new Set();
+        const touchedPhotos = new Set();
+        let shoppingChanged = false;
+
+        for (const change of changes) {
+            if (change.store === 'recettes') {
+                const id = this.toRecipeId(change.id);
+                const before = this.getRecipe(id);
+                if (change.data) {
+                    const recipe = this.normalizeRecipe({ ...change.data, id });
+                    if (!recipe) continue;
+                    await DB.put('recettes', recipe);
+                    if (before) {
+                        this.resetCookingIfChanged(before, recipe);
+                        this.recipes[this.recipes.indexOf(before)] = recipe;
+                    } else {
+                        this.recipes.push(recipe);
+                    }
+                } else {
+                    await DB.delete('recettes', id);
+                    await PhotoStore.delete(id);
+                    this.photoCache.delete(id);
+                    this.recipes = this.recipes.filter(r => r.id !== id);
+                    if (this.cooking[id]) {
+                        delete this.cooking[id];
+                        this.saveJSON(STORAGE.cooking, this.cooking);
+                    }
+                }
+                touchedRecipes.add(id);
+            } else if (change.store === 'photos') {
+                const id = this.toRecipeId(change.id);
+                if (change.data && typeof change.data.image === 'string') await PhotoStore.set(id, change.data.image);
+                else await PhotoStore.delete(id);
+                this.photoCache.delete(id);
+                touchedPhotos.add(id);
+            } else if (change.store === 'courses') {
+                if (change.data) {
+                    this.shopping = this.normalizeShopping(change.data);
+                    await DB.put('courses', this.shopping);
+                } else {
+                    this.shopping = this.emptyShopping();
+                    await DB.delete('courses', SHOPPING_ID);
+                }
+                shoppingChanged = true;
+            }
+        }
+
+        this.refreshAfterRemote(touchedRecipes, touchedPhotos, shoppingChanged);
+    }
+
+    activePageId() {
+        const page = document.querySelector('.page.active');
+        return page ? page.id : 'menu-page';
+    }
+
+    // Réaffiche l'écran courant (après le chargement initial)
+    refreshCurrentPage() {
+        switch (this.activePageId()) {
+            case 'menu-page': this.renderMenu(); break;
+            case 'list-page': this.renderRecipeList(); break;
+            case 'view-page': this.renderRecipe(); break;
+            case 'shopping-page': this.renderShoppingList(); break;
+            case 'info-page': this.updateRecipeCount(); this.renderBackupInfo(); break;
+        }
+    }
+
+    refreshAfterRemote(recipes, photos, shoppingChanged) {
+        this.updateRecipeCount();
+        this.renderMenu();
+        const touched = id => recipes.has(id) || photos.has(id);
+
+        switch (this.activePageId()) {
+            case 'list-page':
+                this.renderRecipeList();
+                break;
+            case 'view-page':
+                if (!this.getRecipe(this.currentRecipeId)) {
+                    this.showRecipeList();
+                    this.showToast('Cette recette a été supprimée sur un autre appareil');
+                } else if (touched(this.currentRecipeId)) {
+                    this.renderRecipe();
+                    this.showToast('Recette mise à jour depuis un autre appareil');
+                } else if (shoppingChanged) {
+                    this.updateShoppingButton();
+                }
+                break;
+            case 'shopping-page':
+                if (shoppingChanged || recipes.size) this.renderShoppingList();
+                break;
+            case 'editor-page':
+                // On ne touche pas à la saisie en cours : on prévient seulement
+                if (this.editingId && touched(this.editingId)) {
+                    if (!this.getRecipe(this.editingId)) {
+                        this.setEditorWarning('⚠️ Cette recette vient d\'être <strong>supprimée</strong> sur un autre appareil. Si tu l\'enregistres, elle sera recréée sur tous les appareils.');
+                    } else {
+                        this.setEditorWarning('⚠️ Cette recette vient d\'être <strong>modifiée</strong> sur un autre appareil. Si tu enregistres, ta version remplacera la sienne partout.'
+                            + '<br><button type="button" class="link-btn" onclick="app.reloadEditorFromRemote()">Afficher la version reçue</button>');
+                    }
+                    // Visible même si on écrit plus bas dans le formulaire
+                    this.showToast('⚠️ Recette changée sur un autre appareil', 'Voir', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+                }
+                break;
+        }
     }
 
     loadJSON(key, fallback) {
