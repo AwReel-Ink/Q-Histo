@@ -1,6 +1,6 @@
 /*!
  * sync-maison.js — synchronisation des applis avec le serveur maison (PocketBase)
- * Version 1.1 — à copier tel quel dans chaque appli, ne pas modifier.
+ * Version 1.3 — à copier tel quel dans chaque appli, ne pas modifier.
  *
  * Deux modes :
  *  - "complet" : chaque enregistrement est synchronisé (ajouts, modifications, suppressions)
@@ -19,7 +19,7 @@
 (function (global) {
   'use strict';
 
-  const VERSION = '1.1';
+  const VERSION = '1.3';
   const CLES = {
     serveur: 'maison.serveur',
     jeton: 'maison.jeton',
@@ -213,6 +213,9 @@
     } else {
       throw new Error('SyncMaison : « mode » doit être "complet" ou "simple".');
     }
+    if (c.copie && typeof c.copie.exporter !== 'function') {
+      throw new Error('SyncMaison : « copie.exporter » doit être une fonction.');
+    }
 
     const local = c._memoireLocale || memoireLocale;
     const base = c._base || baseIndexedDB(c.app);
@@ -354,14 +357,24 @@
       await ecrireEtat('initialise', true);
     }
 
+    // Réception par paquets de PAR_PAGE. Le repère (date de mise à jour + id de la dernière
+    // ligne reçue) avance à chaque paquet : on redemande toujours « ce qui vient après »,
+    // sans numéro de page, pour ne jamais sauter de lignes.
     async function tirer() {
       let recus = 0;
-      let curseur = await lireEtat('curseur', '');
+      let pos = await lireEtat('curseur', '');
+      if (!pos || typeof pos === 'string') pos = { updated: pos || '', id: '' }; // ancien format (1.0 à 1.2)
       let jetonF = null;
-      for (let page = 1; ; page++) {
-        const filtre = curseur ? `&filter=${encodeURIComponent(`updated > "${curseur}"`)}` : '';
-        const r = await requete(`/api/collections/${c.app}/records?perPage=${PAR_PAGE}&page=${page}&sort=updated,id&skipTotal=1${filtre}`);
+      let total = 0;
+      let fait = 0;
+      for (let premier = true; ; premier = false) {
+        const esc = (v) => String(v).replace(/"/g, '\\"');
+        const filtre = pos.updated
+          ? `&filter=${encodeURIComponent(`updated > "${esc(pos.updated)}" || (updated = "${esc(pos.updated)}" && id > "${esc(pos.id)}")`)}`
+          : '';
+        const r = await requete(`/api/collections/${c.app}/records?perPage=${PAR_PAGE}&page=1&sort=updated,id&skipTotal=${premier ? 0 : 1}${filtre}`);
         const lignes = (r && r.items) || [];
+        if (premier) total = (r && r.totalItems) || lignes.length;
         const changements = [];
         const liensAPoser = [];
         for (const l of lignes) {
@@ -384,9 +397,12 @@
         if (changements.length) { await c.appliquer(changements); recus += changements.length; }
         for (const lien of liensAPoser) await base.put('liens', lien);
         if (lignes.length) {
-          curseur = lignes[lignes.length - 1].updated;
-          await ecrireEtat('curseur', curseur);
+          const derniere = lignes[lignes.length - 1];
+          pos = { updated: derniere.updated, id: derniere.id };
+          await ecrireEtat('curseur', pos);
         }
+        fait += lignes.length;
+        if (total) changerEtat({ progression: { etape: 'reception', fait: Math.min(fait, total), total } });
         if (lignes.length < PAR_PAGE) break;
       }
       return recus;
@@ -441,7 +457,12 @@
     async function pousser() {
       let envoyes = 0;
       const entrees = (await base.tout('attente')).sort((a, b) => a.modifie - b.modifie);
+      let n = 0;
       for (const e of entrees) {
+        n++;
+        if (n === 1 || n % 10 === 0 || n === entrees.length) {
+          changerEtat({ progression: { etape: 'envoi', fait: n, total: entrees.length } });
+        }
         let issue;
         try {
           issue = await envoyerUne(e);
@@ -484,6 +505,31 @@
       return true;
     }
 
+    // --- copie lisible (même fichier que l'export manuel) --------------------
+    // Envoyée au plus une fois par intervalle (20 h par défaut), seulement si le
+    // contenu a changé. Le serveur la range dans exports/<appli>/.
+    async function envoyerCopie(forcer) {
+      if (!c.copie) return false;
+      const intervalle = (c.copie.intervalleHeures != null ? c.copie.intervalleHeures : 20) * 3600 * 1000;
+      if (!forcer && Date.now() - (await lireEtat('copieDate', 0)) < intervalle) return false;
+      let v = await c.copie.exporter();
+      let nom = c.copie.nom || `${c.app}.json`;
+      if (v && !estBlob(v) && v.blob) { nom = v.nom || nom; v = v.blob; }
+      const blob = estBlob(v) ? v : new Blob([typeof v === 'string' ? v : JSON.stringify(v)], { type: 'application/json' });
+      const h = await empreinte(blob);
+      if (h === (await lireEtat('copieEmpreinte', ''))) { await ecrireEtat('copieDate', Date.now()); return false; }
+      const fd = new FormData();
+      fd.append('app', c.app);
+      fd.append('appareil', etiquetteAppareil());
+      fd.append('empreinte', h);
+      fd.append('taille', String(blob.size));
+      fd.append('fichier', blob, nom);
+      await requete('/api/collections/copies/records', { method: 'POST', body: fd });
+      await ecrireEtat('copieEmpreinte', h);
+      await ecrireEtat('copieDate', Date.now());
+      return true;
+    }
+
     async function listerSauvegardes() {
       const filtre = encodeURIComponent(`app = "${c.app}"`);
       const r = await requete(`/api/collections/sauvegardes/records?perPage=30&sort=-created&skipTotal=1&filter=${filtre}`);
@@ -503,7 +549,7 @@
     async function faireSynchro(options) {
       if (!reglages.serveur()) { changerEtat({ statut: 'non-configure', message: 'Serveur non configuré' }); return etat; }
       if (!reglages.jeton()) { changerEtat({ statut: 'non-connecte', message: 'Compte non connecté' }); return etat; }
-      changerEtat({ statut: 'en-cours', message: 'Synchronisation…' });
+      changerEtat({ statut: 'en-cours', message: 'Synchronisation…', progression: null });
       let recus = 0;
       let envoyes = 0;
       try {
@@ -513,17 +559,23 @@
           await premiereFois();
           recus = await tirer();
           envoyes = await pousser();
+          try {
+            await envoyerCopie(options && options.forcer);
+          } catch (err) {
+            if (err.code === 'hors-maison' || err.code === 'non-connecte') throw err;
+            console.warn('[SyncMaison] copie lisible non envoyée :', err.message || err);
+          }
         } else {
           envoyes = (await envoyerSauvegarde(options && options.forcer)) ? 1 : 0;
         }
         const derniere = Date.now();
         await ecrireEtat('derniere', derniere);
-        changerEtat({ statut: 'ok', message: 'Synchronisé', derniere, recus, envoyes });
+        changerEtat({ statut: 'ok', message: 'Synchronisé', derniere, recus, envoyes, progression: null });
       } catch (err) {
         const code = err instanceof ErreurMaison ? err.code : 'erreur';
         const statut = code === 'hors-maison' ? 'hors-maison' : code === 'non-connecte' ? 'non-connecte' : 'erreur';
         if (statut === 'erreur') console.error('[SyncMaison]', err);
-        changerEtat({ statut, message: err.message || String(err) });
+        changerEtat({ statut, message: err.message || String(err), progression: null });
       } finally {
         await rafraichirCompteur();
       }
@@ -585,6 +637,7 @@
 
       // mode simple
       envoyerSauvegarde: (forcer) => envoyerSauvegarde(forcer),
+      envoyerCopie: (forcer) => envoyerCopie(forcer),
       listerSauvegardes,
       restaurerSauvegarde,
 
@@ -692,12 +745,24 @@
       }
       function pluriel(n, mot) { return `${n} ${mot}${n > 1 ? 's' : ''}`; }
 
+      let progressionVue = false;
       instance.surEtat((e) => {
         if (e.statut === 'en-cours') {
-          clearTimeout(minutBarre);
-          minutBarre = setTimeout(() => barre.classList.add('on'), 250); // pas de clignotement si c'est rapide
+          if (!barre.classList.contains('on')) {
+            clearTimeout(minutBarre);
+            minutBarre = setTimeout(() => barre.classList.add('on'), 250); // pas de clignotement si c'est rapide
+          }
+          // grosse synchro : bulle de progression qui reste affichée jusqu'à la fin
+          const p = e.progression;
+          if (p && p.total >= 20) {
+            progressionVue = true;
+            clearTimeout(minutBulle);
+            bulle.textContent = `🔄 ${p.etape === 'envoi' ? 'Envoi' : 'Réception'}… ${p.fait} / ${p.total}`;
+            bulle.classList.add('on');
+          }
           return;
         }
+        if (progressionVue) { progressionVue = false; bulle.classList.remove('on'); }
         clearTimeout(minutBarre);
         barre.classList.remove('on');
         if (e.statut === 'ok') {
@@ -811,6 +876,9 @@
       const z = $('etat');
       if (!z) return;
       let texte = `${LIBELLES[e.statut] || e.statut}`;
+      if (e.statut === 'en-cours' && e.progression) {
+        texte += ` (${e.progression.etape === 'envoi' ? 'envoi' : 'réception'} ${e.progression.fait} / ${e.progression.total})`;
+      }
       if (e.statut === 'erreur' && e.message) texte += ` : ${e.message}`;
       texte += `\nDernière synchro : ${formaterDate(e.derniere)}`;
       if (c.mode === 'complet') texte += `\nModifications en attente : ${e.enAttente || 0}`;
@@ -855,7 +923,7 @@
       if (action === 'deconnecter') { instance.deconnecter(); dessinerCompte(); }
       if (action === 'synchro') {
         a.disabled = true;
-        await instance.synchroniser({ forcer: c.mode === 'simple' });
+        await instance.synchroniser({ forcer: true });
         a.disabled = false;
         dessinerSauvegardes();
       }
